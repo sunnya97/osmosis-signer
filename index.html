@@ -1,0 +1,173 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Keplr Tx Signer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{background:#0e1117;color:#e6e6e6;font:14px/1.45 system-ui,sans-serif;margin:0;padding:24px;max-width:1000px;margin:auto}
+h1{font-size:20px}h2{font-size:16px;margin:0 0 6px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin:14px 0}
+input,select,textarea{background:#0d1117;color:#e6e6e6;border:1px solid #30363d;border-radius:6px;padding:6px;font:13px monospace;box-sizing:border-box}
+textarea{width:100%;min-height:120px}
+button{background:#238636;color:#fff;border:0;border-radius:6px;padding:8px 14px;cursor:pointer;margin:4px 6px 4px 0}
+button.sec{background:#30363d}button:disabled{opacity:.4;cursor:not-allowed}
+pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:12px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0}.row label{min-width:110px;color:#8b949e}
+.warn{color:#f0b429}.err{color:#ff6b6b}.ok{color:#3fb950}.mut{color:#8b949e}a{color:#58a6ff}
+</style></head><body>
+<h1>Keplr Transaction Signer</h1>
+<p class="mut">Pre-built transactions. Nothing is stored; no backend; keys stay in Keplr.</p>
+
+<div class="card">
+ <div class="row"><label>Chain ID</label><input id="chainId" value="osmosis-1" size="14">
+  <label>Gas price</label><input id="gasPrice" value="0.025uosmo" size="12">
+  <label>Gas adj.</label><input id="gasAdj" value="1.5" size="4"></div>
+ <div class="row"><label>RPC</label><input id="rpc" list="rpcs" value="https://rpc.osmosis.zone" size="45">
+  <datalist id="rpcs"><option>https://rpc.osmosis.zone</option><option>https://osmosis-rpc.polkachu.com</option><option>https://osmosis-rpc.publicnode.com</option><option>https://rpc-osmosis.ecostake.com</option></datalist></div>
+ <div class="row"><label>REST</label><input id="rest" list="rests" value="https://lcd.osmosis.zone" size="45">
+  <datalist id="rests"><option>https://lcd.osmosis.zone</option><option>https://osmosis-rest.publicnode.com</option><option>https://osmosis-api.polkachu.com</option></datalist></div>
+ <div class="row"><label>Memo</label><input id="memo" size="45"></div>
+ <div class="row"><button id="connect">Connect Keplr</button><span id="addr" class="mut">not connected</span>
+  <button class="sec" id="reload">Recompute live amounts</button></div>
+</div>
+
+<div id="cards"></div>
+
+<details class="card"><summary><b>Advanced: raw messages</b></summary>
+ <p class="mut">JSON array of {typeUrl, value}. MsgExecuteContract <code>msg</code> may be a JSON object (auto-encoded). Uses the connected signer.</p>
+ <textarea id="raw">[{"typeUrl":"/cosmos.bank.v1beta1.MsgSend","value":{"fromAddress":"osmo1...","toAddress":"osmo1...","amount":[{"denom":"uosmo","amount":"1"}]}}]</textarea>
+ <button class="sec" id="rawSim">Simulate</button><button id="rawSend">Sign &amp; Broadcast with Keplr</button>
+ <div id="rawOut"></div>
+</details>
+
+<script type="module">
+// ======== EDIT TRANSACTIONS HERE (or provide sibling transactions.json with same shape) ========
+const POOL = "osmo10c8y69yylnlwrhu32ralf08ekladhfknfqrjsy9yqc9ml8mlxpqq2sttzk";
+const SIGNER = "osmo1xz85h2nvc5l5dxvjpajvdcnk4wq20nydzunvn2";
+const NOBLE = "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4";
+const AXL = "ibc/D189335C6E4A68B513C10AB227BF1C1D38C746766278BA3EEB4FB14124F1D858";
+const SHARE = `factory/${POOL}/transmuter/poolshare`;
+let TRANSACTIONS = [
+  { id:"test-exit", title:"Test: exit 1 USDC from pool 1212",
+    description:"Burns 1 pool share, returns 1 Noble USDC to the signer.",
+    signer:SIGNER,
+    msgs:[{type:"execute", contract:POOL, msg:{exit_pool:{tokens_out:[{denom:NOBLE,amount:"1000000"}]}}, funds:[]}] },
+  { id:"full-exit", title:"Full exit pool 1212",
+    description:"Computed live: all Noble USDC available (up to share balance), remainder in USDC.axl, total == signer's share balance.",
+    signer:SIGNER, live:"fullExit1212", msgs:null },
+];
+// Live builders: async (rest) => {msgs, info}
+const LIVE = {
+  async fullExit1212(rest){
+    const j = async u => { const r = await fetch(rest+u); if(!r.ok) throw new Error(u+" -> HTTP "+r.status); return r.json(); };
+    const shares = BigInt((await j(`/cosmos/bank/v1beta1/balances/${SIGNER}/by_denom?denom=${encodeURIComponent(SHARE)}`)).balance?.amount||"0");
+    const bal = await j(`/cosmos/bank/v1beta1/balances/${POOL}?pagination.limit=1000`);
+    const get = d => BigInt(bal.balances.find(b=>b.denom===d)?.amount||"0");
+    const noblePool = get(NOBLE), axlPool = get(AXL);
+    const noble = noblePool < shares ? noblePool : shares;
+    const axl = shares - noble;
+    if (axl > axlPool) throw new Error(`Not enough liquidity: need ${axl} USDC.axl, pool has ${axlPool}`);
+    if (shares === 0n) throw new Error("Signer has 0 pool shares");
+    const tokens_out = [{denom:NOBLE,amount:noble.toString()}];
+    if (axl > 0n) tokens_out.push({denom:AXL,amount:axl.toString()});
+    const f = x => (Number(x)/1e6).toLocaleString(undefined,{maximumFractionDigits:6});
+    return { msgs:[{type:"execute", contract:POOL, msg:{exit_pool:{tokens_out}}, funds:[]}],
+      info:`Shares: ${f(shares)} | Pool holds ${f(noblePool)} Noble USDC, ${f(axlPool)} USDC.axl → withdrawing ${f(noble)} Noble + ${f(axl)} axl` };
+  }
+};
+// ===============================================================================================
+
+import { SigningCosmWasmClient } from "https://esm.sh/@cosmjs/cosmwasm-stargate@0.32.4";
+import { GasPrice, calculateFee } from "https://esm.sh/@cosmjs/stargate@0.32.4";
+
+const $ = id => document.getElementById(id);
+let address = null, client = null;
+const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+try { const r = await fetch("transactions.json",{cache:"no-store"}); if (r.ok) TRANSACTIONS = await r.json(); } catch {}
+
+function toEncodeObjects(msgs, sender){
+  return msgs.map(m => {
+    if (m.type === "execute") return { typeUrl:"/cosmwasm.wasm.v1.MsgExecuteContract",
+      value:{ sender, contract:m.contract, msg:new TextEncoder().encode(JSON.stringify(m.msg)), funds:m.funds||[] } };
+    const v = {...m.value};
+    if (m.typeUrl === "/cosmwasm.wasm.v1.MsgExecuteContract" && typeof v.msg !== "string" && !(v.msg instanceof Uint8Array))
+      v.msg = new TextEncoder().encode(JSON.stringify(v.msg));
+    return { typeUrl:m.typeUrl, value:v };
+  });
+}
+function displayJson(msgs, sender){
+  return JSON.stringify(msgs.map(m => m.type==="execute"
+    ? {typeUrl:"/cosmwasm.wasm.v1.MsgExecuteContract", value:{sender, contract:m.contract, msg:m.msg, funds:m.funds||[]}} : m), null, 2);
+}
+
+$("connect").onclick = async () => {
+  try {
+    if (!window.keplr) throw new Error("Keplr not found. Serve via http://localhost (not file://) with the extension enabled.");
+    const chainId = $("chainId").value.trim();
+    await window.keplr.enable(chainId);
+    const signer = await window.keplr.getOfflineSignerAuto(chainId);
+    address = (await signer.getAccounts())[0].address;
+    client = await SigningCosmWasmClient.connectWithSigner($("rpc").value.trim(), signer, { gasPrice: GasPrice.fromString($("gasPrice").value.trim()) });
+    $("addr").innerHTML = `<span class="ok">${address}</span>`;
+    render();
+  } catch (e) { $("addr").innerHTML = `<span class="err">${esc(e.message||e)}</span>`; }
+};
+window.addEventListener("keplr_keystorechange", () => { address=null; client=null; $("addr").textContent="account changed — reconnect"; render(); });
+
+async function simulate(msgs, out){
+  if (!client) return out.innerHTML = `<p class="err">Connect Keplr first.</p>`;
+  out.innerHTML = `<p class="mut">Simulating…</p>`;
+  try {
+    const gas = await client.simulate(address, toEncodeObjects(msgs,address), $("memo").value);
+    const fee = calculateFee(Math.ceil(gas*parseFloat($("gasAdj").value)), GasPrice.fromString($("gasPrice").value.trim()));
+    out.innerHTML = `<p class="ok">Simulation OK. Gas used ≈ ${gas}. Fee: ${esc(JSON.stringify(fee))}</p>`;
+  } catch (e) { out.innerHTML = `<p class="err">Simulation failed:</p><pre>${esc(e.message||e)}</pre>`; }
+}
+async function broadcast(msgs, out){
+  if (!client) return out.innerHTML = `<p class="err">Connect Keplr first.</p>`;
+  const chainId = $("chainId").value.trim();
+  out.innerHTML = `<p class="mut">Check Keplr popup…</p>`;
+  try {
+    const res = await client.signAndBroadcast(address, toEncodeObjects(msgs,address), parseFloat($("gasAdj").value), $("memo").value);
+    const h = res.transactionHash;
+    const links = chainId==="osmosis-1" ? `<a target=_blank href="https://celatone.osmosis.zone/osmosis-1/txs/${h}">Celatone</a> · <a target=_blank href="https://www.mintscan.io/osmosis/tx/${h}">Mintscan</a>` : "";
+    out.innerHTML = `<p class="${res.code===0?"ok":"err"}">${res.code===0?"Success":"Failed (code "+res.code+")"} — height ${res.height}, gas ${res.gasUsed}/${res.gasWanted}</p>
+      <p>Tx hash: <code>${h}</code> ${links}</p><pre>${esc(res.rawLog||JSON.stringify(res.events,null,1))}</pre>`;
+  } catch (e) { out.innerHTML = `<p class="err">Error:</p><pre>${esc(e.message||e)}</pre>`; }
+}
+
+async function computeLive(){
+  for (const t of TRANSACTIONS) if (t.live) {
+    t.info = "Computing…"; t.error = null; render();
+    try { const r = await LIVE[t.live]($("rest").value.trim()); t.msgs = r.msgs; t.info = r.info; }
+    catch (e) { t.msgs = null; t.error = e.message||String(e); t.info = null; }
+  }
+  render();
+}
+$("reload").onclick = computeLive;
+
+function render(){
+  const c = $("cards"); c.innerHTML = "";
+  for (const t of TRANSACTIONS) {
+    const d = document.createElement("div"); d.className = "card";
+    const mismatch = t.signer && address && address !== t.signer;
+    const disabled = !t.msgs || mismatch || !address;
+    d.innerHTML = `<h2>${esc(t.title)}</h2><p class="mut">${esc(t.description||"")}</p>
+      <p>Must be signed by: <code>${esc(t.signer||"any")}</code></p>
+      ${mismatch?`<p class="warn">⚠ Connected Keplr address ${esc(address)} differs from required signer. Switch account in Keplr and reconnect.</p>`:""}
+      ${!address?`<p class="warn">Connect Keplr to enable.</p>`:""}
+      ${t.info?`<p class="ok">${esc(t.info)}</p>`:""}${t.error?`<p class="err">${esc(t.error)}</p>`:""}
+      <pre>${t.msgs?esc(displayJson(t.msgs, t.signer||address||"<signer>")):"(not built)"}</pre>`;
+    const sim = document.createElement("button"); sim.className="sec"; sim.textContent="Simulate"; sim.disabled=disabled;
+    const go = document.createElement("button"); go.textContent="Sign & Broadcast with Keplr"; go.disabled=disabled;
+    const out = document.createElement("div");
+    sim.onclick = () => simulate(t.msgs, out);
+    go.onclick = () => { if (confirm(`Sign & broadcast "${t.title}"?\n\n${displayJson(t.msgs,address)}`)) broadcast(t.msgs, out); };
+    d.append(sim, go, out); c.append(d);
+  }
+}
+function parseRaw(){ const a = JSON.parse($("raw").value); if (!Array.isArray(a)) throw new Error("Must be a JSON array"); return a; }
+$("rawSim").onclick = () => { try { simulate(parseRaw(), $("rawOut")); } catch(e){ $("rawOut").innerHTML=`<p class="err">${esc(e.message)}</p>`; } };
+$("rawSend").onclick = () => { try { const m=parseRaw(); if (confirm("Sign & broadcast?\n\n"+JSON.stringify(m,null,2))) broadcast(m, $("rawOut")); } catch(e){ $("rawOut").innerHTML=`<p class="err">${esc(e.message)}</p>`; } };
+
+render(); computeLive();
+</script></body></html>
