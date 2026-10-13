@@ -75,8 +75,18 @@ const LIVE = {
 };
 // ===============================================================================================
 
-import { SigningCosmWasmClient } from "https://esm.sh/@cosmjs/cosmwasm-stargate@0.32.4";
-import { GasPrice, calculateFee } from "https://esm.sh/@cosmjs/stargate@0.32.4";
+let SigningCosmWasmClient, GasPrice, calculateFee;
+const libReady = (async () => {
+  const errs = [];
+  for (const base of ["https://esm.sh/@cosmjs/cosmwasm-stargate@0.32.4?bundle", "https://cdn.jsdelivr.net/npm/@cosmjs/cosmwasm-stargate@0.32.4/+esm"]) {
+    try { const m = await import(base); SigningCosmWasmClient = m.SigningCosmWasmClient; GasPrice = m.GasPrice; calculateFee = m.calculateFee;
+      if (!GasPrice || !calculateFee) { const sg = await import(base.includes("esm.sh") ? "https://esm.sh/@cosmjs/stargate@0.32.4?bundle" : "https://cdn.jsdelivr.net/npm/@cosmjs/stargate@0.32.4/+esm"); GasPrice = sg.GasPrice; calculateFee = sg.calculateFee; }
+      return; } catch (e) { errs.push(base + ": " + (e.message||e)); }
+  }
+  throw new Error("Failed to load CosmJS library. " + errs.join(" | "));
+})();
+libReady.catch(e => { const a=document.getElementById("addr"); if (a) a.innerHTML = '<span class="err">'+String(e.message).replace(/</g,"&lt;")+'</span>'; });
+window.addEventListener("error", e => { const a=document.getElementById("addr"); if (a) a.innerHTML = '<span class="err">Page error: '+String(e.message).replace(/</g,"&lt;")+'</span>'; });
 
 const $ = id => document.getElementById(id);
 let address = null, client = null;
@@ -100,8 +110,10 @@ function displayJson(msgs, sender){
 }
 
 $("connect").onclick = async () => {
+  $("addr").textContent = "connecting…";
   try {
-    if (!window.keplr) throw new Error("Keplr not found. Serve via http://localhost (not file://) with the extension enabled.");
+    await libReady;
+    if (!window.keplr) throw new Error("Keplr not found. Make sure the Keplr extension is installed, enabled, and unlocked, then reload.");
     const chainId = $("chainId").value.trim();
     await window.keplr.enable(chainId);
     const signer = await window.keplr.getOfflineSignerAuto(chainId);
